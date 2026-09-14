@@ -69,9 +69,13 @@ type observingServiceHarness struct {
 type propertyServiceHarness struct {
 	*serviceHarness
 	selection harness.InferenceSelection
+	modelsErr error
 }
 
 func (r *propertyServiceHarness) Models(context.Context) ([]harness.Model, error) {
+	if r.modelsErr != nil {
+		return nil, r.modelsErr
+	}
 	return []harness.Model{{ID: "model-a", DisplayName: "Model A", Default: true, Efforts: []string{"low", "high", "ultra"}, DefaultEffort: "high", ServiceModes: []harness.ModelPropertyOption{{ID: "fast", DisplayName: "Fast", Description: "Priority processing"}}}}, nil
 }
 func (r *propertyServiceHarness) SetInference(selection harness.InferenceSelection) {
@@ -695,6 +699,9 @@ func TestScreenSelectionConfirmationIsSavedForItsTUIConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	screen, err := service.ScreenActionForInstance(context.Background(), "instance", "model", "select:sonnet", nil)
+	if err == nil && screen != nil && strings.HasPrefix(screen.ID, "model-effort:") {
+		screen, err = service.ScreenActionForInstance(context.Background(), "instance", screen.ID, "select:", nil)
+	}
 	if err != nil || screen == nil || screen.ActionMessage == "" {
 		t.Fatalf("selection = %#v, %v", screen, err)
 	}
@@ -2789,11 +2796,15 @@ func TestHarnessAndModelCommandsUseSharedSettings(t *testing.T) {
 	if err := service.Handle(context.Background(), core.Message{Channel: "tui", Conversation: "local", Text: "/model"}, func(event core.Event) { response = event }); err != nil {
 		t.Fatal(err)
 	}
-	if response.Kind != core.EventScreen || response.Screen == nil || response.Screen.ID != "model" || len(response.Screen.Controls) != 3 || !response.Screen.SaveDisabled || response.Screen.InitialControl != "select:opus" || response.Screen.Controls[0].Key != "select:" || response.Screen.Controls[1].Kind != "action" {
+	if response.Kind != core.EventScreen || response.Screen == nil || response.Screen.ID != "model" || len(response.Screen.Controls) != 4 || !response.Screen.SaveDisabled || response.Screen.InitialControl != "select:opus" || response.Screen.Controls[0].Key != "select:" || response.Screen.Controls[1].Kind != "action" || response.Screen.Controls[3].Value != "Custom" {
 		t.Fatalf("/model response = %#v", response)
 	}
-	if next, err := service.ScreenAction(context.Background(), "model", "select:sonnet", nil); err != nil || next == nil || !strings.Contains(next.ActionMessage, "subsequent harness turns") || service.Settings.Snapshot().Harness.Model != "sonnet" {
-		t.Fatalf("model screen selection = %#v, %v, config %#v", next, err, service.Settings.Snapshot().Harness)
+	effort, err := service.ScreenAction(context.Background(), "model", "select:sonnet", nil)
+	if err != nil || effort == nil || !strings.HasPrefix(effort.ID, "model-effort:") {
+		t.Fatalf("model effort selection = %#v, %v", effort, err)
+	}
+	if next, err := service.ScreenAction(context.Background(), effort.ID, "select:", nil); err != nil || next == nil || !strings.Contains(next.ActionMessage, "subsequent harness turns") || service.Settings.Snapshot().Harness.Model != "sonnet" {
+		t.Fatalf("model selection = %#v, %v", next, err)
 	}
 	response = core.Event{}
 	if err := service.Handle(context.Background(), core.Message{Channel: "telegram", Conversation: "TG-7", Text: "/harness"}, func(event core.Event) { response = event }); err != nil {
@@ -2962,8 +2973,77 @@ func TestProviderAdvertisedReasoningEffortPersistsEndToEnd(t *testing.T) {
 	if err != nil || reloaded.Harness.ReasoningEffort != "ultra" {
 		t.Fatalf("persisted advertised effort = %q, %v", reloaded.Harness.ReasoningEffort, err)
 	}
-	if _, err := service.ApplySettings(map[string]string{"harness.reasoning_effort": "turbo"}); err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("unadvertised effort error = %v", err)
+	if _, err := service.ApplySettings(map[string]string{"harness.reasoning_effort": "turbo"}); err != nil {
+		t.Fatalf("manual effort was rejected: %v", err)
+	}
+	reloaded, err = config.Load(config.PathForRoot(root))
+	if err != nil || reloaded.Harness.ReasoningEffort != "turbo" {
+		t.Fatalf("persisted manual effort = %q, %v", reloaded.Harness.ReasoningEffort, err)
+	}
+}
+
+func TestCustomModelAndEffortPersistAndDispatchWithoutDiscovery(t *testing.T) {
+	for _, detectionFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("detection-fails=%t", detectionFails), func(t *testing.T) {
+			root := t.TempDir()
+			if err := workspace.Init(root, false); err != nil {
+				t.Fatal(err)
+			}
+			cfg, _ := config.Load(config.PathForRoot(root))
+			cfg.Harness.Name = "codex"
+			target := &propertyServiceHarness{serviceHarness: newServiceHarness()}
+			if detectionFails {
+				target.modelsErr = errors.New("discovery unavailable")
+			}
+			registry := harness.NewRegistry()
+			registry.Register("codex", func(harness.HarnessConfig) (harness.Harness, error) { return target, nil })
+			supervisor := harness.NewSupervisor(registry, harness.HarnessConfig{Name: "codex"})
+			if err := supervisor.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = supervisor.Close() })
+			service := New(cfg, supervisor)
+			screen, err := service.ScreenAction(context.Background(), "config", "model", nil)
+			if err != nil || screen == nil || screen.Controls[len(screen.Controls)-1].Value != "Custom" {
+				t.Fatalf("custom model choice = %#v, %v", screen, err)
+			}
+			for _, input := range []string{"future/model", "turbo"} {
+				screen, err = service.ScreenAction(context.Background(), screen.ID, "custom", nil)
+				if err != nil || screen == nil || screen.Controls[0].Kind != "text" {
+					t.Fatalf("custom form = %#v, %v", screen, err)
+				}
+				if _, err := service.ScreenAction(context.Background(), screen.ID, "custom:select", map[string]string{"custom": "\n"}); err == nil {
+					t.Fatal("empty custom value was accepted")
+				}
+				screen, err = service.ScreenAction(context.Background(), screen.ID, "custom:select", map[string]string{"custom": input})
+				if err != nil || screen == nil {
+					t.Fatalf("custom selection = %#v, %v", screen, err)
+				}
+				if input == "future/model" {
+					if screen.Controls[len(screen.Controls)-1].Value != "Custom" || service.Settings.Snapshot().Harness.Model != "" {
+						t.Fatal("missing custom effort or prematurely committed selection")
+					}
+				}
+			}
+			if screen.SavedControl == nil || !reflect.DeepEqual(*screen.SavedControl, modelSettingControl("future/model", "turbo", "")) {
+				t.Fatalf("saved control = %#v", screen.SavedControl)
+			}
+			reloaded, err := config.Load(config.PathForRoot(root))
+			if err != nil || reloaded.Harness.Model != "future/model" || reloaded.Harness.ReasoningEffort != "turbo" {
+				t.Fatalf("reloaded selection = %#v, %v", reloaded.Harness, err)
+			}
+			if _, _, err := supervisor.Send(context.Background(), "custom", "check custom selection", nil); err != nil {
+				t.Fatal(err)
+			}
+			if target.selection.Model != "future/model" || target.selection.Effort != "turbo" {
+				t.Fatalf("dispatch selection = %#v", target.selection)
+			}
+			for _, value := range []string{"bad\neffort", "two words", strings.Repeat("x", 129), string([]byte{0xff})} {
+				if _, err := service.ApplySettings(map[string]string{"effort": value}); err == nil {
+					t.Fatal("invalid custom effort was accepted")
+				}
+			}
+		})
 	}
 }
 

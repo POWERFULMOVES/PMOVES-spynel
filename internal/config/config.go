@@ -367,7 +367,10 @@ func (c Config) Validate() error {
 	if c.Harness.Name == "acp" && strings.TrimSpace(c.Harness.ACPCommand) == "" {
 		problems = append(problems, "harness.acp_command is required when harness.name is acp")
 	}
-	if !validReasoningEffort(c.Harness.ReasoningEffort) {
+	if len(c.Harness.Model) > 1024 || !utf8.ValidString(c.Harness.Model) || strings.IndexFunc(c.Harness.Model, unicode.IsControl) >= 0 {
+		problems = append(problems, "harness.model must be one line of at most 1024 bytes")
+	}
+	if !harness.ValidReasoningEffort(normalizeInheritedValue(c.Harness.ReasoningEffort)) {
 		problems = append(problems, "harness.reasoning_effort must be inherit or a one-line identifier of at most 128 bytes")
 	}
 	if len(c.Harness.ServiceMode) > 128 || strings.IndexFunc(c.Harness.ServiceMode, unicode.IsControl) >= 0 {
@@ -495,13 +498,6 @@ func normalizeServiceMode(value string) string {
 		return ""
 	}
 	return value
-}
-
-func validReasoningEffort(value string) bool {
-	value = normalizeInheritedValue(value)
-	return len(value) <= 128 && strings.IndexFunc(value, func(r rune) bool {
-		return unicode.IsControl(r) || unicode.IsSpace(r)
-	}) < 0
 }
 
 func acpHarnessName(name string) bool {

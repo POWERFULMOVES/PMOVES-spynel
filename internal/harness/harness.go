@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/agent0ai/spynel/internal/core"
 )
@@ -68,11 +71,21 @@ type InferenceDispatcher interface {
 	SetInference(InferenceSelection)
 }
 
-// ValidateInferenceSelection rejects stale or unsupported properties without
-// passing them to a provider. A custom model remains usable only with inherited
-// properties because its capabilities are unknown.
+// ValidReasoningEffort accepts bounded identifiers, including manual values
+// absent from a provider's discovery results. The provider validates support.
+func ValidReasoningEffort(value string) bool {
+	return len(value) <= 128 && utf8.ValidString(value) && strings.IndexFunc(value, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.IsSpace(r)
+	}) < 0
+}
+
+// ValidateInferenceSelection permits manual reasoning identifiers but requires
+// verified service capabilities. Model and effort support is provider-owned.
 func ValidateInferenceSelection(models []Model, selection InferenceSelection) error {
-	if selection.Effort == "" && selection.ServiceMode == "" {
+	if !ValidReasoningEffort(selection.Effort) {
+		return errors.New("reasoning effort must be a one-line identifier of at most 128 bytes")
+	}
+	if selection.ServiceMode == "" {
 		return nil
 	}
 	var selected *Model
@@ -83,16 +96,7 @@ func ValidateInferenceSelection(models []Model, selection InferenceSelection) er
 		}
 	}
 	if selected == nil {
-		return fmt.Errorf("model %q has no verified inference-property capabilities; reset effort and service mode to inherit", selection.Model)
-	}
-	if selection.Effort != "" {
-		valid := false
-		for _, value := range selected.Efforts {
-			valid = valid || value == selection.Effort
-		}
-		if !valid {
-			return fmt.Errorf("reasoning effort %q is not supported by model %q", selection.Effort, selected.ID)
-		}
+		return fmt.Errorf("model %q has no verified service capabilities; reset service mode to inherit", selection.Model)
 	}
 	if selection.ServiceMode != "" {
 		valid := false

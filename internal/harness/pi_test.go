@@ -111,7 +111,7 @@ func TestPiRPCStreamsSettlesAndResumes(t *testing.T) {
 			resumed++
 		}
 	}
-	if rpcInvocations != 6 || resumed != 1 {
+	if rpcInvocations != 4 || resumed != 1 {
 		t.Fatalf("Pi RPC invocations = %d, resumed = %d", rpcInvocations, resumed)
 	}
 }
@@ -148,8 +148,8 @@ func TestPiModelsUseRPCThinkingLevelsPerModel(t *testing.T) {
 	if !models[0].Default || models[1].Default || models[2].Default {
 		t.Fatalf("Pi current/default model mapping = %#v", models)
 	}
-	if err := ValidateInferenceSelection(models, InferenceSelection{Model: "fixture/model-a", Effort: "xhigh"}); err == nil {
-		t.Fatal("Pi accepted an effort absent from the selected model's RPC levels")
+	if err := ValidateInferenceSelection(models, InferenceSelection{Model: "fixture/model-a", Effort: "xhigh"}); err != nil {
+		t.Fatalf("Pi rejected a manual effort absent from discovery: %v", err)
 	}
 	if err := ValidateInferenceSelection(models, InferenceSelection{Model: "fixture/model-max", Effort: "max"}); err != nil {
 		t.Fatalf("Pi rejected an RPC-advertised effort: %v", err)
@@ -191,8 +191,8 @@ func TestPiLegacyOmittedModelAndEffortUseCurrentModelCapabilities(t *testing.T) 
 	if _, _, err := pi.Send(ctx, "legacy", "legacy defaults", nil); err != nil {
 		t.Fatalf("Pi rejected omitted model with legacy medium effort: %v", err)
 	}
-	if _, _, err := pi.SendWithInference(ctx, "explicit", "strict explicit value", InferenceSelection{Effort: "medium"}, nil); err == nil {
-		t.Fatal("Pi accepted explicit medium for an off-only default model")
+	if _, _, err := pi.SendWithInference(ctx, "explicit", "manual value", InferenceSelection{Effort: "medium"}, nil); err != nil {
+		t.Fatalf("Pi rejected a manual effort: %v", err)
 	}
 	var mediumInvocations int
 	for _, record := range readFixtureRecords(t, logPath) {
@@ -200,8 +200,8 @@ func TestPiLegacyOmittedModelAndEffortUseCurrentModelCapabilities(t *testing.T) 
 			mediumInvocations++
 		}
 	}
-	if mediumInvocations != 1 {
-		t.Fatalf("legacy Pi --thinking medium invocations = %d, want 1", mediumInvocations)
+	if mediumInvocations != 2 {
+		t.Fatalf("legacy and explicit Pi --thinking medium invocations = %d, want 2", mediumInvocations)
 	}
 }
 

@@ -5144,11 +5144,22 @@ func TestDependentModelSelectionPreservesParentAndRefreshesCommittedControl(t *t
 			m.screen.Controls[1].Value = "unsaved edit"
 			m.screenIndex = 1
 			m.openScreen(core.Screen{ID: "model", ParentID: "config", SaveDisabled: true})
-			for _, id := range []string{"model-effort:bW9kZWwtYQ", "model-service:bW9kZWwtYQ.aGlnaA"} {
-				next, _ := m.Update(screenActionResult{action: "select:model-a", screen: &core.Screen{ID: id, SaveDisabled: true}})
+			for step, id := range []string{"model", "model-effort:bW9kZWwtYQ", "model-effort:bW9kZWwtYQ", "model-service:bW9kZWwtYQ.aGlnaA"} {
+				screen := &core.Screen{ID: id, SaveDisabled: true}
+				if step == 0 || step == 2 {
+					screen.Controls = []core.ScreenControl{{Key: "custom", Kind: "text"}, {Key: "custom:select", Kind: "action", Value: "Continue"}}
+				}
+				next, _ := m.Update(screenActionResult{action: "custom", screen: screen})
 				m = next.(model)
 				if m.screen == nil || m.screen.ID != id || len(m.screenStack) != 1 {
 					t.Fatalf("dependent step returned early: screen=%#v stack=%d", m.screen, len(m.screenStack))
+				}
+				if step == 0 || step == 2 {
+					next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("manual-value")})
+					m = next.(model)
+					if m.screenValues()["custom"] != "manual-value" {
+						t.Fatal("custom text input did not retain typed value")
+					}
 				}
 			}
 			saved := core.ScreenControl{Key: "model", Kind: "action", Value: "Model · model-a", Description: "effort high · speed inherit"}

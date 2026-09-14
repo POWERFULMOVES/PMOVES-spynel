@@ -198,6 +198,9 @@ func setSetting(cfg *Config, key, value string) (Setting, error) { //nolint:gocy
 	case "harness.model":
 		cfg.Harness.Model = value
 	case "harness.reasoning_effort":
+		if !harness.ValidReasoningEffort(value) {
+			return Setting{}, fmt.Errorf("harness.reasoning_effort must be inherit or a one-line identifier of at most 128 bytes")
+		}
 		cfg.Harness.ReasoningEffort = normalizeInheritedValue(value)
 		cfg.Harness.reasoningEffortOmitted = false
 	case "harness.service_mode":

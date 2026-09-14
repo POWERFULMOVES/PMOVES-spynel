@@ -190,14 +190,8 @@ func (p *Pi) SendWithInference(ctx context.Context, key, prompt string, selectio
 	if selection.ServiceMode != "" {
 		return "", false, errors.New("Pi does not support a Spynel service mode; reset harness.service_mode to inherit")
 	}
-	if selection.Effort != "" && !selection.LegacyEffort {
-		models, err := p.Models(ctx)
-		if err != nil {
-			return "", false, fmt.Errorf("validate Pi inference properties: %w", err)
-		}
-		if err := ValidateInferenceSelection(models, selection); err != nil {
-			return "", false, err
-		}
+	if err := ValidateInferenceSelection(nil, selection); err != nil {
+		return "", false, err
 	}
 	lock := p.lockForKey(key)
 	lock.Lock()

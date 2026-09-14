@@ -316,14 +316,16 @@ func (c *Codex) SendWithInference(ctx context.Context, key, prompt string, selec
 	if strings.TrimSpace(prompt) == "" {
 		return "", false, errors.New("harness prompt is empty")
 	}
-	if selection.Effort != "" || selection.ServiceMode != "" {
-		models, err := c.Models(ctx)
+	var models []Model
+	if selection.ServiceMode != "" {
+		var err error
+		models, err = c.Models(ctx)
 		if err != nil {
 			return "", false, fmt.Errorf("validate Codex inference properties: %w", err)
 		}
-		if err := ValidateInferenceSelection(models, selection); err != nil {
-			return "", false, err
-		}
+	}
+	if err := ValidateInferenceSelection(models, selection); err != nil {
+		return "", false, err
 	}
 	lock := c.lockForKey(key)
 	lock.Lock()

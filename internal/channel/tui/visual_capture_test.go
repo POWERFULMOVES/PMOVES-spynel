@@ -76,6 +76,8 @@ func TestVisualCapture(t *testing.T) {
 		"config":                visualConfigModel(),
 		"model-effort":          visualModelEffortModel(74),
 		"model-effort-narrow":   visualModelEffortModel(32),
+		"model-custom":          visualCustomInferenceModel("model", "future/model"),
+		"effort-custom":         visualCustomInferenceModel("reasoning effort", "turbo"),
 		"config-advanced":       visualAdvancedConfigModel(),
 		"config-discard-dialog": visualConfigDiscardDialogModel(),
 		"telegram-config":       visualTelegramConfigModel(),
@@ -107,6 +109,16 @@ func visualModelEffortModel(width int) model {
 	next, _ := value.Update(tea.WindowSizeMsg{Width: width, Height: 18})
 	value = next.(model)
 	value.openScreen(core.Screen{ID: "model-effort:fixture", Title: "Reasoning effort", SaveDisabled: true, Subtitle: "Choose effort for GPT-5. Inherit uses its default.", Hints: []core.ScreenHint{{Key: "↑↓/⇥", Action: "nav"}, {Key: "␠/↵", Action: "select"}, {Key: "␛", Action: "cancel"}}, Controls: []core.ScreenControl{{Key: "select:", Kind: "action", Value: "Inherit", Description: "Use the model default"}, {Key: "select:low", Kind: "action", Value: "low", Description: "Low reasoning"}, {Key: "select:high", Kind: "action", Value: "high", Description: "High reasoning"}, {Key: "select:xhigh", Kind: "action", Value: "xhigh", Description: "Extra-high reasoning"}}})
+	value.screen.Controls = append(value.screen.Controls, core.ScreenControl{Key: "custom", Kind: "action", Value: "Custom", Description: "Enter an exact reasoning effort"})
+	return value
+}
+
+func visualCustomInferenceModel(label, input string) model {
+	value := visualBaseModel()
+	value.openScreen(core.Screen{ID: "model", Title: "Custom " + label, SaveDisabled: true, Hints: []core.ScreenHint{{Key: "↑↓/⇥", Action: "nav"}, {Key: "␠/↵", Action: "choose"}, {Key: "␛", Action: "cancel"}}, Controls: []core.ScreenControl{
+		{Key: "custom", Label: "Custom " + label, Kind: "text", Value: input, Description: "Enter the exact value accepted by your harness"},
+		{Key: "custom:select", Kind: "action", Value: "Continue"},
+	}})
 	return value
 }
 

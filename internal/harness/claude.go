@@ -302,11 +302,8 @@ func (c *Claude) SendWithInference(ctx context.Context, key, prompt string, sele
 	if selection.ServiceMode != "" {
 		return "", false, errors.New("Claude Code does not support a Spynel service mode; reset harness.service_mode to inherit")
 	}
-	if selection.Effort != "" {
-		models, _ := c.Models(ctx)
-		if err := ValidateInferenceSelection(models, selection); err != nil {
-			return "", false, err
-		}
+	if err := ValidateInferenceSelection(nil, selection); err != nil {
+		return "", false, err
 	}
 	lock := c.lockForKey(key)
 	lock.Lock()

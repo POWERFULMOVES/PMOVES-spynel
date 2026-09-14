@@ -15,27 +15,28 @@ import (
 // Definition is one built-in coding harness that Spynel can discover and
 // launch without exposing executable paths or provider-specific flags.
 type Definition struct {
-	Name        string
-	DisplayName string
-	Command     string
-	Args        []string
-	Env         []string
-	Description string
-	InstallURL  string
-	CheckArgs   []string
-	CheckOutput string
-	Custom      bool
-	factory     Factory
+	Name           string
+	DisplayName    string
+	Command        string
+	Args           []string
+	Env            []string
+	Description    string
+	InstallURL     string
+	CheckArgs      []string
+	CheckOutput    string
+	Custom         bool
+	SupportsEffort bool
+	factory        Factory
 }
 
 var catalog = []Definition{
 	{
-		Name: "codex", DisplayName: "Codex", Command: "codex",
+		Name: "codex", DisplayName: "Codex", Command: "codex", SupportsEffort: true,
 		Description: "OpenAI Codex CLI", InstallURL: "https://developers.openai.com/codex/cli/",
 		factory: newCodexFromHarnessConfig,
 	},
 	{
-		Name: "claude-code", DisplayName: "Claude Code", Command: "claude",
+		Name: "claude-code", DisplayName: "Claude Code", Command: "claude", SupportsEffort: true,
 		Description: "Anthropic Claude Code CLI", InstallURL: "https://docs.anthropic.com/en/docs/claude-code/overview",
 		factory: func(cfg HarnessConfig) (Harness, error) { return NewClaude(cfg) },
 	},
@@ -44,7 +45,7 @@ var catalog = []Definition{
 		"Agent Zero CLI via ACP", "https://github.com/agent0ai/a0-connector",
 	),
 	{
-		Name: "pi", DisplayName: "Pi", Command: "pi",
+		Name: "pi", DisplayName: "Pi", Command: "pi", SupportsEffort: true,
 		Description: "Pi coding agent via native RPC", InstallURL: "https://github.com/earendil-works/pi",
 		factory: func(cfg HarnessConfig) (Harness, error) { return NewPi(cfg) },
 	},

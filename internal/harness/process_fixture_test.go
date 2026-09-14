@@ -2,6 +2,7 @@ package harness
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/agent0ai/spynel/internal/core"
 )
 
 const (
@@ -34,6 +37,60 @@ func TestMain(m *testing.M) {
 		os.Exit(runHarnessFixture(mode))
 	}
 	os.Exit(m.Run())
+}
+
+func TestManualInferenceReachesProvidersWithoutCatalogDiscovery(t *testing.T) {
+	for name, mode := range map[string]string{"codex": "codex-lifecycle", "claude-code": "claude-stream", "pi": "pi-lifecycle"} {
+		t.Run(name, func(t *testing.T) {
+			command, root, logPath := portableHarnessFixture(t, mode)
+			definition, _ := Lookup(name)
+			target, err := definition.factory(HarnessConfig{Command: command, Cwd: root, ApprovalPolicy: "plan", SessionsFile: filepath.Join(root, "sessions.json")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := target.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			defer target.Close()
+			finished := make(chan core.Event, 1)
+			selection := InferenceSelection{Model: "future/model", Effort: "turbo"}
+			if _, _, err := target.(InferenceDispatcher).SendWithInference(ctx, "custom", "synthetic check", selection, func(event core.Event) {
+				if event.Done {
+					finished <- event
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case event := <-finished:
+				if event.Kind != core.EventFinal {
+					t.Fatalf("provider terminal = %#v", event)
+				}
+			case <-ctx.Done():
+				t.Fatal("timed out waiting for provider")
+			}
+			passed := false
+			for _, record := range readFixtureRecords(t, logPath) {
+				if record.Method == "model/list" || record.Method == "get_available_models" || record.Method == "get_available_thinking_levels" {
+					t.Fatalf("manual dispatch depended on discovery: %s", record.Method)
+				}
+				if name == "codex" && record.Method == "turn/start" {
+					var params map[string]any
+					if err := json.Unmarshal(record.Params, &params); err != nil {
+						t.Fatal(err)
+					}
+					passed = params["model"] == selection.Model && params["effort"] == selection.Effort
+				} else if name != "codex" && record.Kind == "invocation" {
+					passed = passed || containsArgument(record.Args, selection.Model) && containsArgument(record.Args, selection.Effort)
+				}
+			}
+			if !passed {
+				t.Fatal("manual model and effort did not reach the provider")
+			}
+		})
+	}
 }
 
 // portableHarnessFixture copies the current Go test executable to a path that

@@ -118,7 +118,7 @@ func (s *Service) screenAction(ctx context.Context, instanceID, screenID, action
 	if screen, handled, err := s.configurationScreenAction(ctx, screenID, action, values); handled {
 		return screen, err
 	}
-	if screen, handled, err := s.selectionScreenAction(ctx, screenID, action); handled {
+	if screen, handled, err := s.selectionScreenAction(ctx, screenID, action, values); handled {
 		return screen, err
 	}
 	if screenID == "resume" && strings.HasPrefix(action, "resume:") {
