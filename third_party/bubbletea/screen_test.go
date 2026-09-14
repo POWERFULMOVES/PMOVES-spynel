@@ -2,8 +2,33 @@ package tea
 
 import (
 	"bytes"
+	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
+
+func TestClearScreenReestablishesAlternateOwnership(t *testing.T) {
+	var output bytes.Buffer
+	r := newRenderer(&output, false, 60).(*standardRenderer)
+	r.handleMessages(WindowSizeMsg{Width: 80, Height: 24})
+	r.enterAltScreen()
+	r.write("application frame")
+	r.flush()
+	output.Reset()
+	r.clearScreen()
+	cleared := output.String()
+	exit := strings.Index(cleared, ansi.ResetAltScreenSaveCursorMode)
+	enter := strings.Index(cleared, ansi.SetAltScreenSaveCursorMode)
+	if exit < 0 || enter <= exit || !strings.Contains(cleared[:exit], ansi.ResetStyle+ansi.CursorHomePosition+ansi.EraseScreenBelow) {
+		t.Fatalf("alternate ownership was not cleared and restored: %q", cleared)
+	}
+	r.write("application frame")
+	r.flush()
+	if !r.altScreen() || !strings.Contains(output.String()[len(cleared):], "application frame") {
+		t.Fatal("clearing did not retain alternate ownership and invalidate the frame")
+	}
+}
 
 func TestClearMsg(t *testing.T) {
 	tests := []struct {

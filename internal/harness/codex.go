@@ -2,6 +2,7 @@ package harness
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -47,7 +48,7 @@ type Codex struct {
 	keyLocks map[string]*sync.Mutex
 	mu       sync.Mutex
 	nextID   int
-	pending  map[int]chan rpcResponse
+	pending  map[int]codexPendingCall
 	session  map[string]string
 	loaded   map[string]bool
 	active   map[string]*turnState
@@ -57,6 +58,22 @@ type Codex struct {
 }
 
 func (*Codex) FollowUpMode() FollowUpMode { return FollowUpSteer }
+
+// Available reports the transport state, not merely whether a process was
+// constructed. The owning supervisor publishes readiness after replacement.
+func (c *Codex) Available() (bool, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failure != nil {
+		return false, c.failure.Error()
+	}
+	if c.closed || c.stdin == nil {
+		return false, "Codex app-server is not running"
+	}
+	return true, ""
+}
+
+func (*Codex) ReadyEvents() <-chan struct{} { return nil }
 
 type turnState struct {
 	key              string
@@ -92,6 +109,11 @@ func (s *turnState) replaceEmit(emit core.Emit) core.Emit {
 type rpcResponse struct {
 	Result json.RawMessage
 	Error  *rpcError
+}
+
+type codexPendingCall struct {
+	method   string
+	response chan rpcResponse
 }
 
 type rpcError struct {
@@ -156,7 +178,7 @@ func NewCodex(cfg CodexConfig) (*Codex, error) {
 		cfg.Sandbox = "dangerFullAccess"
 	}
 	c := &Codex{
-		config: cfg, nextID: 1, pending: map[int]chan rpcResponse{}, session: map[string]string{},
+		config: cfg, nextID: 1, pending: map[int]codexPendingCall{}, session: map[string]string{},
 		loaded: map[string]bool{}, active: map[string]*turnState{}, deferred: map[string][]wireMessage{},
 		keyLocks: map[string]*sync.Mutex{},
 	}
@@ -459,12 +481,15 @@ func (c *Codex) ensureThread(ctx context.Context, key, model string) (string, er
 		return threadID, nil
 	}
 	if threadID != "" {
-		result, err := c.call(ctx, "thread/resume", map[string]any{"threadId": threadID})
+		// Codex retains the full conversation internally. Spynel needs only
+		// its identity; returning the history can overflow the shared stream.
+		result, err := c.call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true})
 		if err != nil {
 			var callErr *rpcCallError
 			if errors.As(err, &callErr) && callErr.Code == -32601 {
 				return "", fmt.Errorf("cannot safely resume persisted Codex thread %q: required method thread/resume is unavailable: %w", threadID, err)
 			}
+			return "", fmt.Errorf("cannot safely resume persisted Codex thread: %w", err)
 		} else {
 			var response struct {
 				Thread struct {
@@ -754,7 +779,7 @@ func (c *Codex) beginCall(method string, params any) (int, chan rpcResponse, err
 	id := c.nextID
 	c.nextID++
 	response := make(chan rpcResponse, 1)
-	c.pending[id] = response
+	c.pending[id] = codexPendingCall{method: method, response: response}
 	c.mu.Unlock()
 	if err := c.write(map[string]any{"id": id, "method": method, "params": params}); err != nil {
 		c.mu.Lock()
@@ -802,8 +827,16 @@ func (c *Codex) write(message any) error {
 }
 
 func (c *Codex) readLoop(reader io.Reader) {
+	const maxMessage = 16 * 1024 * 1024
+	oversized := "message (header unavailable)"
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), maxMessage)
+	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		if len(data) >= maxMessage && bytes.IndexByte(data, '\n') < 0 {
+			oversized = c.describeFrame(data[:min(len(data), 4096)])
+		}
+		return bufio.ScanLines(data, atEOF)
+	})
 	for scanner.Scan() {
 		var message wireMessage
 		if json.Unmarshal(scanner.Bytes(), &message) != nil {
@@ -818,8 +851,8 @@ func (c *Codex) readLoop(reader io.Reader) {
 			waiter := c.pending[id]
 			delete(c.pending, id)
 			c.mu.Unlock()
-			if waiter != nil {
-				waiter <- rpcResponse{Result: message.Result, Error: message.Error}
+			if waiter.response != nil {
+				waiter.response <- rpcResponse{Result: message.Result, Error: message.Error}
 			}
 			continue
 		}
@@ -833,7 +866,60 @@ func (c *Codex) readLoop(reader io.Reader) {
 			c.handleNotification(message)
 		}
 	}
-	c.failAll(fmt.Errorf("codex app-server stream closed: %v", scanner.Err()))
+	err := scanner.Err()
+	if errors.Is(err, bufio.ErrTooLong) {
+		err = fmt.Errorf("Codex app-server %s exceeds the 16 MiB transport limit; connection stopped; use /restart to reconnect (interrupted requests are not replayed)", oversized)
+	} else if err == nil {
+		err = io.EOF
+	}
+	c.failAll(fmt.Errorf("codex app-server stream closed: %w", err))
+}
+
+// Inspect only the bounded envelope prefix. Never put payloads, provider IDs,
+// or arbitrary strings into diagnostics, even for malformed protocol output.
+func (c *Codex) describeFrame(prefix []byte) string {
+	decoder := json.NewDecoder(bytes.NewReader(prefix))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return "message (header unavailable)"
+	}
+	key, err := decoder.Token()
+	if err == nil {
+		switch key {
+		case "method":
+			var method string
+			if decoder.Decode(&method) != nil {
+				break
+			}
+			switch method {
+			case "item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "item/plan/delta",
+				"item/started", "item/completed", "item/commandExecution/outputDelta", "item/fileChange/outputDelta",
+				"thread/started", "turn/started", "turn/completed", "turn/diff/updated", "error",
+				"codex/event/raw_response_item", "codex/event/session_configured", "codex/event/exec_command_end", "codex/event/mcp_tool_call_end":
+				return "notification " + method
+			}
+			return "notification (unrecognized method)"
+		case "id":
+			var id json.Number
+			if decoder.Decode(&id) != nil {
+				break
+			}
+			number, err := strconv.Atoi(string(id))
+			if err != nil {
+				break
+			}
+			c.mu.Lock()
+			call := c.pending[number]
+			c.mu.Unlock()
+			if call.method != "" {
+				return "response to " + call.method
+			}
+			return "response (request no longer pending)"
+		default:
+			// The body may itself be huge. Do not decode it to find a header.
+			return "message (header unavailable)"
+		}
+	}
+	return "message (header unavailable)"
 }
 
 func (c *Codex) waitLoop() {
@@ -861,11 +947,15 @@ func (c *Codex) failAll(err error) {
 	c.failure = err
 	pending := c.pending
 	active := c.active
-	c.pending = map[int]chan rpcResponse{}
+	c.pending = map[int]codexPendingCall{}
 	c.active = map[string]*turnState{}
+	c.deferred = map[string][]wireMessage{}
 	c.mu.Unlock()
+	// Close stdin as well as cancelling the process: an npm launcher may have
+	// a native child that must receive EOF even if its wrapper is killed.
+	_ = c.Close()
 	for _, waiter := range pending {
-		waiter <- rpcResponse{Error: &rpcError{Code: -1, Message: err.Error()}}
+		waiter.response <- rpcResponse{Error: &rpcError{Code: -1, Message: err.Error()}}
 	}
 	for _, state := range active {
 		state.emitEvent(core.Event{Kind: core.EventError, Text: err.Error(), ThreadID: state.threadID, TurnID: state.turnID, Done: true,

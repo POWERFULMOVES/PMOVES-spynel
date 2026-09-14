@@ -723,9 +723,9 @@ func (m model) repaint() tea.Cmd {
 	}
 	// Bubble Tea's renderer can still believe it owns the alternate screen
 	// after a terminal process was suspended or a display server restored the
-	// main buffer. Leave and re-enter through that same renderer so its state
-	// and the terminal agree again, then force one complete frame repaint.
-	return tea.Sequence(tea.ExitAltScreen, tea.EnterAltScreen, tea.ClearScreen)
+	// main buffer. ClearScreen re-establishes ownership under the renderer's
+	// flush lock, then forces one complete frame repaint.
+	return tea.ClearScreen
 }
 
 func (m model) waitEvent() tea.Cmd {

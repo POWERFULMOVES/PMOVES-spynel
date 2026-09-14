@@ -325,6 +325,14 @@ func (r *standardRenderer) clearScreen() {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 
+	if r.altScreenActive {
+		// Re-establish terminal ownership without letting a renderer flush
+		// land on the ordinary screen between the two mode changes.
+		r.exitAltScreenLocked()
+		r.enterAltScreenLocked()
+		return
+	}
+
 	r.execute(ansi.EraseEntireScreen)
 	r.execute(ansi.CursorHomePosition)
 
@@ -341,7 +349,10 @@ func (r *standardRenderer) altScreen() bool {
 func (r *standardRenderer) enterAltScreen() {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
+	r.enterAltScreenLocked()
+}
 
+func (r *standardRenderer) enterAltScreenLocked() {
 	if r.altScreenActive {
 		return
 	}
@@ -376,7 +387,10 @@ func (r *standardRenderer) enterAltScreen() {
 func (r *standardRenderer) exitAltScreen() {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
+	r.exitAltScreenLocked()
+}
 
+func (r *standardRenderer) exitAltScreenLocked() {
 	if !r.altScreenActive {
 		return
 	}

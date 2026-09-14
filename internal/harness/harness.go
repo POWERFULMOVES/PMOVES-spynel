@@ -121,8 +121,8 @@ type ModelDispatcher interface {
 	SetModel(string)
 }
 
-// Availability is implemented by runtime supervisors that can remain usable
-// for configuration even when their selected harness executable is missing.
+// Availability reports live adapter health through the runtime supervisor,
+// which remains usable for configuration when its provider is unavailable.
 type Availability interface {
 	Available() (bool, string)
 	ReadyEvents() <-chan struct{}

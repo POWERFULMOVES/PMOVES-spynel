@@ -1160,7 +1160,14 @@ func TestBubbleTeaRendererKeepsOneComposerAcrossResizeStormAndResume(t *testing.
 		tea.WithOutput(capture),
 		tea.WithAltScreen(),
 		tea.WithContext(ctx),
-		tea.WithFilter(filterTerminalEvents),
+		tea.WithFilter(func(current tea.Model, message tea.Msg) tea.Msg {
+			if reflect.TypeOf(message) == reflect.TypeOf(tea.EnterAltScreen()) {
+				// An asynchronously queued screen switch can be delayed while
+				// the renderer keeps flushing. Make that window deterministic.
+				time.Sleep(30 * time.Millisecond)
+			}
+			return filterTerminalEvents(current, message)
+		}),
 		tea.WithFPS(120),
 		tea.WithoutSignals(),
 	)
@@ -1217,6 +1224,9 @@ func TestBubbleTeaRendererKeepsOneComposerAcrossResizeStormAndResume(t *testing.
 	enterIndex := strings.Index(segment, ansi.SetAltScreenSaveCursorMode)
 	if exitIndex < 0 || enterIndex <= exitIndex {
 		t.Fatalf("resume restoration order = exit %d enter %d", exitIndex, enterIndex)
+	}
+	if text := ansi.Strip(segment[exitIndex+len(ansi.ResetAltScreenSaveCursorMode) : enterIndex]); strings.TrimSpace(text) != "" {
+		t.Fatal("focus repaint rendered the TUI into the ordinary terminal")
 	}
 	if count := strings.Count(stable, ansi.SetAltScreenSaveCursorMode); count != 1 {
 		t.Fatalf("renderer started %d alternate-screen owners, want one", count)

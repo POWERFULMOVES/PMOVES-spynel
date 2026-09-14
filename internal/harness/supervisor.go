@@ -233,6 +233,9 @@ func (s *Supervisor) Available() (bool, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.current != nil {
+		if availability, ok := s.current.(Availability); ok {
+			return availability.Available()
+		}
 		return true, ""
 	}
 	if s.startErr != nil {

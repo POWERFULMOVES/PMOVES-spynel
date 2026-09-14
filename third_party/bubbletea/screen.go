@@ -14,7 +14,8 @@ type WindowSizeMsg struct {
 // of the screen and clear visual clutter when the alt screen is not in use.
 //
 // Note that it should never be necessary to call ClearScreen() for regular
-// redraws.
+// redraws. When the alternate screen is owned, this also re-establishes its
+// terminal mode under the renderer's flush lock before repainting.
 func ClearScreen() Msg {
 	return clearScreenMsg{}
 }

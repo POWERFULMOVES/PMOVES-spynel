@@ -251,7 +251,11 @@ done
 
 Replay checks three consecutive short selections, longer-to-shorter output,
 wrapping, resize, over-height text, cursor placement, preserved shell history
-and return-screen isolation. Exit captures cover real Ctrl+C, `/quit`,
+and return-screen isolation. Focus/send repaints restore alternate-screen mode
+under one renderer lock; separate asynchronous exit/enter commands could let a
+frame flush into the ordinary terminal before F6. The renderer regression
+delays queued screen commands to verify that this gap cannot reopen.
+Exit captures cover real Ctrl+C, `/quit`,
 SIGTERM/context cancellation and Ctrl+C after F6. They verify blank visible
 alternate cells before the final screen switch, exact ordinary-screen/history
 and cursor content, restored mouse/focus/paste modes and colors, preserved

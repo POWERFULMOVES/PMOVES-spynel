@@ -108,7 +108,7 @@ func runHarnessFixture(mode string) int {
 	executable, _ := os.Executable()
 	appendFixtureLog(map[string]any{"kind": "invocation", "args": os.Args[1:], "cwd": mustGetwd(), "executable": executable})
 	switch mode {
-	case "codex-lifecycle", "codex-interrupt", "codex-models", "codex-init-missing-method", "codex-resume-missing-method", "codex-thread-changed-field", "codex-terminal-changed-status":
+	case "codex-lifecycle", "codex-interrupt", "codex-models", "codex-init-missing-method", "codex-resume-missing-method", "codex-resume-error", "codex-stream-overflow", "codex-thread-changed-field", "codex-terminal-changed-status":
 		return runCodexFixture(mode)
 	case "claude-stream", "claude-steer", "claude-text", "claude-interrupt", "claude-help-missing-flag", "claude-init-changed-event", "claude-terminal-error", "claude-result-nonzero":
 		return runClaudeFixture(mode)
@@ -389,6 +389,10 @@ func runCodexFixture(mode string) int {
 			}
 			write(map[string]any{"id": message.ID, "result": map[string]any{}})
 		case "thread/start", "thread/resume":
+			if mode == "codex-resume-error" && message.Method == "thread/resume" {
+				write(map[string]any{"id": message.ID, "error": map[string]any{"code": -32000, "message": "resume failed"}})
+				continue
+			}
 			if mode == "codex-resume-missing-method" && message.Method == "thread/resume" {
 				write(map[string]any{"id": message.ID, "error": map[string]any{"code": -32601, "message": "Method not found"}})
 				continue
@@ -400,6 +404,16 @@ func runCodexFixture(mode string) int {
 			threadID := "thr_test"
 			if mode == "codex-interrupt" {
 				threadID = "thr_stop"
+			}
+			if mode == "codex-lifecycle" && message.Method == "thread/resume" {
+				var params struct {
+					ExcludeTurns bool `json:"excludeTurns"`
+				}
+				_ = json.Unmarshal(message.Params, &params)
+				if !params.ExcludeTurns {
+					write(map[string]any{"id": message.ID, "result": map[string]any{"thread": map[string]any{"id": threadID, "turns": []any{map[string]any{"text": strings.Repeat("history", 3*1024*1024)}}}}})
+					continue
+				}
 			}
 			write(map[string]any{"id": message.ID, "result": map[string]any{"thread": map[string]any{"id": threadID}}})
 		case "turn/start":
@@ -426,6 +440,10 @@ func runCodexFixture(mode string) int {
 			write(map[string]any{"id": message.ID, "result": map[string]any{}})
 			write(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thr_stop", "turn": map[string]any{"id": "turn_stop", "status": "interrupted"}}})
 		case "model/list":
+			if mode == "codex-stream-overflow" {
+				write(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": "fixture-thread", "turnId": "fixture-turn", "item": map[string]any{"type": "commandExecution", "aggregatedOutput": strings.Repeat("x", 17*1024*1024)}}})
+				continue
+			}
 			write(map[string]any{"id": message.ID, "result": map[string]any{"data": []any{map[string]any{"id": "model-a", "model": "model-a", "displayName": "Model A", "defaultReasoningEffort": "medium", "supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "low"}, map[string]any{"reasoningEffort": "medium"}, map[string]any{"reasoningEffort": "ultra"}}, "serviceTiers": []any{map[string]any{"id": "fast", "name": "Fast", "description": "Priority processing"}}, "defaultServiceTier": nil, "isDefault": true}}, "nextCursor": nil}})
 		}
 	}

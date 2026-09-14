@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -454,13 +455,152 @@ func TestCodexAppServerStartsThreadsStreamsAndSteers(t *testing.T) {
 
 func TestCodexTransportLossEmitsStructuredFatalFailure(t *testing.T) {
 	events := make(chan core.Event, 1)
-	codex := &Codex{pending: map[int]chan rpcResponse{}, active: map[string]*turnState{
+	input, writer := io.Pipe()
+	defer input.Close()
+	defer writer.Close()
+	codex := &Codex{pending: map[int]codexPendingCall{}, active: map[string]*turnState{
 		"thread": {threadID: "thread", turnID: "turn", emit: func(event core.Event) { events <- event }},
-	}}
+	}, stdin: writer}
 	codex.failAll(errors.New("connection lost"))
+	eof := make(chan error, 1)
+	go func() {
+		_, err := input.Read(make([]byte, 1))
+		eof <- err
+	}()
+	select {
+	case err := <-eof:
+		if err != io.EOF {
+			t.Fatalf("provider input after failure = %v, want EOF", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed transport left provider input open behind its launcher")
+	}
 	event := <-events
 	if !event.Done || event.Kind != core.EventError || event.Execution == nil || event.Execution.State != "error" || !strings.Contains(event.Execution.Detail, "connection lost") {
 		t.Fatalf("transport loss event = %#v", event)
+	}
+}
+
+func TestCodexOversizedMessageStopsProviderAndReportsUnavailable(t *testing.T) {
+	command, root, logPath := portableHarnessFixture(t, "codex-stream-overflow")
+	supervisor := NewSupervisor(NewBuiltinRegistry(), HarnessConfig{Name: "codex", Command: command, Cwd: root})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := supervisor.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer supervisor.Close()
+	if ready, detail := supervisor.Available(); !ready {
+		t.Fatalf("new connection unavailable: %s", detail)
+	}
+	codex := supervisor.current.(*Codex)
+	_, err := supervisor.Models(ctx)
+	if err == nil || !strings.Contains(err.Error(), "notification item/completed") || !strings.Contains(err.Error(), "16 MiB") || !strings.Contains(err.Error(), "/restart") {
+		t.Fatalf("oversized message diagnostic = %v", err)
+	}
+	if ready, detail := supervisor.Available(); ready || !strings.Contains(detail, "16 MiB") {
+		t.Fatalf("broken transport status = %t, %q", ready, detail)
+	}
+	select {
+	case <-codex.ctx.Done():
+	default:
+		t.Fatal("unreadable provider was left running")
+	}
+	_, _, err = supervisor.Send(ctx, "chat", "do not replay", nil)
+	if err == nil || !strings.Contains(err.Error(), "16 MiB") {
+		t.Fatalf("failed transport accepted a new turn: %v", err)
+	}
+	for _, record := range readFixtureRecords(t, logPath) {
+		if record.Method == "thread/start" || record.Method == "turn/start" {
+			t.Fatal("failed connection dispatched work")
+		}
+	}
+	t.Setenv(fixtureModeEnv, "codex-lifecycle")
+	if err := supervisor.Reconfigure(supervisor.HarnessConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if ready, detail := supervisor.Available(); !ready {
+		t.Fatalf("replacement connection unavailable: %s", detail)
+	}
+	done := make(chan core.Event, 1)
+	if _, _, err := supervisor.Send(ctx, "chat", "new request", func(event core.Event) {
+		if event.Done {
+			done <- event
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-done:
+		if event.Kind != core.EventFinal || event.Text != "hello world" {
+			t.Fatalf("replacement connection result = %#v", event)
+		}
+	case <-ctx.Done():
+		t.Fatal("replacement connection did not complete")
+	}
+	turns := 0
+	for _, record := range readFixtureRecords(t, logPath) {
+		if record.Method == "turn/start" {
+			turns++
+			if !strings.Contains(string(record.Params), "new request") {
+				t.Fatal("replacement replayed a failed request")
+			}
+		}
+	}
+	if turns != 1 {
+		t.Fatalf("replacement dispatched %d turns, want one new request", turns)
+	}
+}
+
+func TestCodexOversizedFrameDiagnosticsExposeOnlyProtocolMetadata(t *testing.T) {
+	codex, err := NewCodex(CodexConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex.pending[7] = codexPendingCall{method: "thread/resume"}
+	for _, test := range []struct{ prefix, want string }{
+		{`{"id":7,"result":{"private":"`, "response to thread/resume"},
+		{`{"id":"7","result":`, "response to thread/resume"},
+		{`{"method":"turn/completed","params":{"private":"`, "notification turn/completed"},
+		{`{"method":"private-value","params":`, "notification (unrecognized method)"},
+		{`{"id":"private-value","result":`, "message (header unavailable)"},
+		{`{"params":{"private":"`, "message (header unavailable)"},
+	} {
+		if got := codex.describeFrame([]byte(test.prefix)); got != test.want {
+			t.Fatalf("frame description = %q, want %q", got, test.want)
+		}
+	}
+}
+
+func TestCodexResumeFailurePreservesConversation(t *testing.T) {
+	command, root, logPath := portableHarnessFixture(t, "codex-resume-error")
+	sessions := filepath.Join(root, "sessions.json")
+	original := []byte(`{"chat":"existing-thread"}`)
+	if err := os.WriteFile(sessions, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	codex, err := NewCodex(CodexConfig{Command: command, Cwd: root, SessionsFile: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := codex.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer codex.Close()
+	_, _, err = codex.Send(ctx, "chat", "continue", nil)
+	if err == nil || !strings.Contains(err.Error(), "resume failed") {
+		t.Fatalf("resume failure was hidden: %v", err)
+	}
+	current, err := os.ReadFile(sessions)
+	if err != nil || string(current) != string(original) || codex.ThreadID("chat") != "existing-thread" {
+		t.Fatalf("saved session changed after failed resume: %v", err)
+	}
+	for _, record := range readFixtureRecords(t, logPath) {
+		if record.Method == "thread/start" || record.Method == "turn/start" {
+			t.Fatal("resume failure created or dispatched a replacement conversation")
+		}
 	}
 }
 

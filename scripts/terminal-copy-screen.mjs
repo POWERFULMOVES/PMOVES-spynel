@@ -28,19 +28,20 @@ for (const archiveOnED2 of [false, true]) {
   // distinction; this is a policy model, NOT execution of Warp or its UI.
   // https://github.com/warpdotdev/warp/blob/b61e936f40ce766d3321aa4b7a2c064f001df582/crates/warp_terminal/src/model/grid/ansi_handler.rs#L799-L860
   const feed = async (term, output) => {
-    const parts = output.split("\x1b[2J");
-    for (let i = 0; i < parts.length; i++) {
-      if (i) {
-        if (archiveOnED2 && term.buffer.active.type === "normal") {
-          const b = term.buffer.normal;
-          const visible = lines(b).slice(b.baseY);
-          const used = visible.findLastIndex(line => line !== "") + 1;
-          const cursor = `\x1b[${b.cursorY + 1};${b.cursorX + 1}H`;
-          await write(term, `\x1b[${term.rows};1H` + "\r\n".repeat(used) + cursor);
-        }
-        await write(term, "\x1b[2J");
+    const parts = output.split(/(\x1b\[2J|\x1b\[\?1049l)/);
+    for (const part of parts) {
+      if (part === "\x1b[2J" && archiveOnED2 && term.buffer.active.type === "normal") {
+        const b = term.buffer.normal;
+        const visible = lines(b).slice(b.baseY);
+        const used = visible.findLastIndex(line => line !== "") + 1;
+        const cursor = `\x1b[${b.cursorY + 1};${b.cursorX + 1}H`;
+        await write(term, `\x1b[${term.rows};1H` + "\r\n".repeat(used) + cursor);
       }
-      await write(term, parts[i]);
+      if (part === "\x1b[?1049l" && term.buffer.active.type === "alternate") {
+        assert.ok(lines(term.buffer.active, term.cols).every(line => line.trimEnd() === ""),
+          "alternate screen was not cleared before copy, repaint, or exit");
+      }
+      await write(term, part);
     }
   };
   for (const event of events) {
@@ -59,7 +60,7 @@ for (const archiveOnED2 of [false, true]) {
         }
       }
       await feed(term, boundary + parts[1]);
-      await feed(expectedExit, boundary + "\x1b[0m\x1b[?25h\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l" +
+      await write(expectedExit, boundary + "\x1b[0m\x1b[?25h\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l" +
         "shutdown diagnostic\r\nshell-ready> shell input\r\nshell-read: shell input\r\nPASS\r\n");
       assert.equal(term.buffer.active.type, "normal");
       assert.deepEqual(state(term), state(expectedExit), "exit changed shell history/cursor, lost diagnostics, or rendered after cleanup");
@@ -100,7 +101,7 @@ for (const archiveOnED2 of [false, true]) {
       assert.deepEqual(state(term), returned, "TUI return wrote into the ordinary copy area");
     }
   }
-  assert.ok(copies === 0 || copies === 11);
+  assert.ok(copies === 0 || copies === 12);
   assert.equal(events.at(-1).phase, "exit", "capture must include actual process exit");
   console.log(JSON.stringify({ emulator: "xterm-headless 5.5.0", archiveOnED2, copies, result: "passed" }));
   term.dispose();
