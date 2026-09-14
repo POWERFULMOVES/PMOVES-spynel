@@ -1714,6 +1714,48 @@ func TestTelegramCommandMentionRoutesToSharedCommand(t *testing.T) {
 	}
 }
 
+func TestTelegramStartRepliesWithoutRegisteringACommand(t *testing.T) {
+	root := t.TempDir()
+	if err := workspace.Init(root, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(config.PathForRoot(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := newServiceHarness()
+	service := New(cfg, target)
+	t.Cleanup(func() { _ = service.Close() })
+	for _, test := range []struct{ channel, text, want string }{
+		{"telegram", "/start", "Spynel is running."},
+		{"telegram", "/start@spynel_bot", "Spynel is running."},
+		{"telegram", "/start payload", "Spynel is running."},
+		{"tui", "/start", "Unknown command /start. Use /help."},
+		{"cli", "/start", "Unknown command /start. Use /help."},
+		{"whatsapp", "/start", "Unknown command /start. Use /help."},
+	} {
+		var events []core.Event
+		message := core.Message{Channel: test.channel, Conversation: "start", Text: test.text}
+		if err := service.Handle(context.Background(), message, func(event core.Event) { events = append(events, event) }); err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 1 || events[0].Kind != core.EventFinal || !events[0].Done || !events[0].Local || events[0].Text != test.want {
+			t.Fatalf("%s %q response = %#v", test.channel, test.text, events)
+		}
+	}
+	if len(target.prompts) != 0 {
+		t.Fatal("Telegram start should not call the harness")
+	}
+	for _, command := range SlashCommands() {
+		if strings.Fields(command.Value)[0] == "/start" {
+			t.Fatal("Telegram start must stay out of the command catalog")
+		}
+	}
+	if strings.Contains(helpFor("")+helpFor("commands"), "`/start`") {
+		t.Fatal("Telegram start must stay out of help")
+	}
+}
+
 func TestTitleCommandPersistsFromRemoteChannelsAndNotifiesTUI(t *testing.T) {
 	root := t.TempDir()
 	if err := workspace.Init(root, false); err != nil {

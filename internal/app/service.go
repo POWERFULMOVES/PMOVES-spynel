@@ -891,6 +891,9 @@ func (s *Service) handleCommand(ctx context.Context, message core.Message, emit 
 	command := strings.ToLower(parts[0])
 	if message.Channel == "telegram" {
 		command = strings.SplitN(command, "@", 2)[0]
+		if command == "start" {
+			return s.localReply(message, "Spynel is running.", emit)
+		}
 	}
 	remainder := strings.TrimSpace(strings.TrimPrefix(commandLine, parts[0]))
 	switch command {
