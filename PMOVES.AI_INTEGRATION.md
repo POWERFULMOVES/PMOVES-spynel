@@ -22,12 +22,17 @@ Never pipe the CDN installer. The fork is the trusted path:
 
 Node-local runtime state lives in `.spynel/` (0600, gitignored).
 
-## Transports (F3 decision owed)
+## Transports (F3 — reconciled with upstream 2026-09-17)
 
-The local API binds a private unix-domain socket with a constant-time
-bearer token (Linux/macOS only). Windows fleet nodes
-(elder-melchor / z890 / 5090) are unsupported until a named-pipe
-transport overlay lands; do not fall back to TCP.
+Adopted from upstream `agent0ai/spynel` (docs/programmatic-integration.md,
+AGENTS.md): the local API binds loopback (127.0.0.1) with a constant-time
+bearer token as the supported default for ordinary local CLI/TUI clients.
+The private authenticated Unix socket (`serve --socket <path>`) is an
+optional supplement for integration clients; it does not replace loopback
+and changes no election fences or TUI conversation identity. Our earlier
+"unix socket only, no TCP" note was miswritten against upstream's design
+and is withdrawn. No unit-level flag edits: if a socket is ever needed on
+this node it is a config-surface decision recorded here first.
 
 ## Template governance (F4)
 
