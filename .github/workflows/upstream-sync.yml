@@ -1,0 +1,28 @@
+name: upstream-sync
+
+# Keeps fork main current with agent0ai/spynel. Scheduled + manual.
+# The PMOVES.AI-Edition-Hardened overlay is rebased manually after syncs
+# (known road: git rebase main on the overlay branch).
+
+on:
+  schedule:
+    - cron: "23 6 * * 1" # Mondays 06:23 UTC — off-peak, unique minute
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge upstream into fork main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          result="$(gh api repos/${{ github.repository }}/merge-upstream -f branch=main 2>&1)" && echo "$result" || {
+            echo "$result"
+            echo "::warning::merge-upstream did not fast-forward (divergence or conflict) — manual rebase required"
+            exit 1
+          }
