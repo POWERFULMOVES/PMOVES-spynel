@@ -1,0 +1,180 @@
+name: fork-sync
+
+# Registry-first sync, upstream->fork direction — PORT of the proven
+# PMOVES-hermes-agent fork-sync.yml (landed there via PRs #13/#14/#15).
+# Provenance: DARKXSIDE doctrine (2026-09-20); registry entry
+# pmoves/config/fork_registry.json -> PMOVES-spynel (sync: true).
+# Upstream: agent0ai/spynel (Go, multi-agent chat orchestration).
+#
+# Resolution policy (identical gates to the hermes-agent original):
+#   - overlay footprint = files fork main changed since the merge-base,
+#     computed at runtime (never hardcoded) -> keep OURS on conflict;
+#   - upstream canonical everywhere else (take theirs);
+#   - modify/delete pairs resolve keep-ours when overlay, take-theirs
+#     otherwise; unresolved conflicts FAIL LOUDLY — never push a stale tip;
+#   - workflows-guard: the fork keeps its own .github/workflows/** line —
+#     for spynel that surface is {fork-sync.yml, upstream-sync.yml,
+#     release.yml, AGENTS.md}; upstream workflow churn never rides the sync
+#     (GITHUB_TOKEN cannot push workflow-file changes anyway).
+#
+# Overlay-surface note (spynel-specific): the PMOVES.AI-Edition-Hardened
+# branch carries PMOVES.AI_INTEGRATION.md and is rebased manually after
+# syncs (same doctrine as the old upstream-sync.yml header) — this workflow
+# only reconciles fork main; the hardened branch is a separate lane.
+#
+# Danger-room rooms: stale-checkout-heal, phantom-deliverable.
+# The resolved branch and its PR are OUTPUT; merging to main is
+# OPERATOR-GATED.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Upstream repo (owner/name)'
+        required: false
+        default: 'agent0ai/spynel'
+      source_branch:
+        description: 'Upstream branch to merge'
+        required: false
+        default: 'main'
+      base:
+        description: 'Fork branch to update'
+        required: false
+        default: 'main'
+  schedule:
+    - cron: '17 * * * *'  # hourly release-watch tick; unique minute (hermes runs :03); sync exits early unless the upstream release tag changed
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+jobs:
+  release-watch:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.watch.outputs.tag }}
+      changed: ${{ steps.watch.outputs.changed }}
+    steps:
+      - id: watch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_REPO: ${{ inputs.source_repo || 'agent0ai/spynel' }}
+        run: |
+          set -euo pipefail
+          TAG=$(gh api "repos/$SOURCE_REPO/releases/latest" --jq .tag_name 2>/dev/null || echo "")
+          echo "upstream latest release: ${TAG:-none}"
+          STATE=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/fork-sync-state.json?ref=main" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo '{}')
+          LAST=$(echo "$STATE" | python3 -c "import json,sys;print(json.load(sys.stdin).get('last_upstream_release',''))" 2>/dev/null || echo "")
+          echo "tracked: ${LAST:-none}"
+          OPEN=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/sync/fork-resolved" --jq 'length' 2>/dev/null || echo 0)
+          echo "unlanded resolved branches: $OPEN"
+          if [ -n "$TAG" ] && [ "$TAG" != "$LAST" ] && [ "$OPEN" = "0" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  sync:
+    needs: release-watch
+    if: github.event_name == 'workflow_dispatch' || needs.release-watch.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SOURCE_REPO: ${{ inputs.source_repo || 'agent0ai/spynel' }}
+      SOURCE_BRANCH: ${{ inputs.source_branch || 'main' }}
+      BASE: ${{ inputs.base || 'main' }}
+      RELEASE_TAG: ${{ needs.release-watch.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base || 'main' }}
+          fetch-depth: 0
+
+      - name: Merge upstream with overlay-aware resolution
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.email "powerfulmoves@pmoves.ai"
+          git config user.name "PMOVES"
+          UPSTREAM_SHA=$(gh api "repos/$SOURCE_REPO/commits/$SOURCE_BRANCH" --jq .sha)
+          echo "upstream tip: $UPSTREAM_SHA"
+          git remote add upstream "https://github.com/$SOURCE_REPO.git"
+          git fetch upstream "$SOURCE_BRANCH" --quiet
+          # overlay footprint = files fork main changed since the merge-base,
+          # computed at runtime (never hardcoded — same discipline as the
+          # hardened-sync allowlist fix)
+          MB=$(git merge-base HEAD "$UPSTREAM_SHA")
+          git diff --name-only "$MB" HEAD | sort -u > /tmp/overlay.txt
+          echo "overlay footprint: $(wc -l < /tmp/overlay.txt) files"
+          BASE_SHA=$(git rev-parse HEAD)
+          git merge --no-commit "$UPSTREAM_SHA" || true
+          # resolution: overlay files keep ours; upstream canonical elsewhere
+          git status --porcelain | grep -E '^(DD|AU|UD|UA|DU|AA|UU)' > /tmp/conflicts.txt || true
+          while IFS= read -r row; do
+            [ -z "$row" ] && continue
+            code="${row%% *}"
+            f="${row:3}"
+            [ -z "$f" ] && continue
+            if grep -qxF "$f" /tmp/overlay.txt; then
+              echo "overlay: keep ours — $f ($code)"
+              case "$code" in
+                UD) git add -A -- "$f" 2>/dev/null || true ;;
+                DU) git rm -q -- "$f" 2>/dev/null || true ;;
+                *)  git checkout --ours -- "$f" 2>/dev/null || true; git add -A -- "$f" 2>/dev/null || true ;;
+              esac
+            else
+              echo "upstream: take theirs — $f ($code)"
+              case "$code" in
+                UD) git rm -q -- "$f" 2>/dev/null || true ;;
+                *)  git checkout --theirs -- "$f" 2>/dev/null || true; git add -A -- "$f" 2>/dev/null || true ;;
+              esac
+            fi
+          done < /tmp/conflicts.txt
+          N=$(git diff --name-only --diff-filter=U | wc -l)
+          echo "remaining unmerged: $N"
+          if [ "$N" -gt 0 ]; then
+            git diff --name-only --diff-filter=U
+            echo "::error::Unresolved conflicts remain — failing loudly"
+            exit 1
+          fi
+          # workflows-guard: GITHUB_TOKEN cannot push workflow-file changes
+          # through this path (parser + push-gate receipts on hermes PR #13).
+          # The fork keeps its own workflow line — for spynel that means
+          # fork-sync.yml / upstream-sync.yml / release.yml / AGENTS.md stay
+          # OURS; upstream-added workflow files are dropped, not merged.
+          git diff --name-only "$BASE_SHA" "$UPSTREAM_SHA" -- '.github/workflows/' > /tmp/wfchanges.txt
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if git cat-file -e "$BASE_SHA:$f" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$f"
+              echo "workflows-guard: kept ours — $f"
+            else
+              git rm -q -- "$f" 2>/dev/null || true
+              echo "workflows-guard: dropped upstream-added — $f"
+            fi
+          done < /tmp/wfchanges.txt
+          # release-watch state rides the merge commit (lands on main when the
+          # operator merges the resolved PR; until then the open resolved
+          # branch suppresses re-ticking)
+          printf '{"last_upstream_release": "%s"}\n' "$RELEASE_TAG" > .github/fork-sync-state.json
+          git add .github/fork-sync-state.json
+          if [ -f .git/MERGE_HEAD ]; then git commit --no-edit; fi
+          PARENTS=$(git cat-file -p HEAD | grep -c '^parent ')
+          echo "HEAD parents: $PARENTS"
+          if [ "$PARENTS" -lt 2 ]; then
+            echo "::error::no merge commit concluded — refusing to push"
+            exit 1
+          fi
+          BR="sync/fork-resolved-${{ github.run_number }}"
+          git push origin "HEAD:refs/heads/$BR"
+          echo "pushed $BR"
+          gh pr create --base "$BASE" --head "$BR" \
+            --title "sync(fork): absorb $SOURCE_REPO@$SOURCE_BRANCH (release ${RELEASE_TAG:-n/a})" \
+            --body "Registry-first sync output (fork-sync run ${{ github.run_number }}). Overlay footprint kept ours on conflict; upstream canonical elsewhere. Per-file resolution log in the run: ${{ github.server_url }}/$GITHUB_REPOSITORY/actions/runs/${{ github.run_number }}. **Merge is OPERATOR-GATED.**" \
+            || echo "PR may already exist for this branch"
