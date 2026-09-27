@@ -44,6 +44,7 @@ var catalog = []Definition{
 		"agent-zero", "Agent Zero CLI", "a0", []string{"acp"}, []string{"acp", "--check"}, "A0 ACP check OK",
 		"Agent Zero CLI via ACP", "https://github.com/agent0ai/a0-connector",
 	),
+	acpDefinition("crush", "Crush", "crush", []string{"acp"}, "Charm Crush via ACP (PMOVES fork)", "https://github.com/POWERFULMOVES/PMOVES-crush"),
 	{
 		Name: "pi", DisplayName: "Pi", Command: "pi", SupportsEffort: true,
 		Description: "Pi coding agent via native RPC", InstallURL: "https://github.com/earendil-works/pi",
@@ -109,7 +110,7 @@ func StaticCapabilities(name string) (reasoning, service string) {
 		return "low, medium, high, xhigh, max", "unsupported"
 	case "pi":
 		return "per-model catalog", "unsupported"
-	case "agent-zero", "opencode", "qwen-code", "kimi", "goose", "cursor", "gemini-cli", "github-copilot", "factory-droid", "acp":
+	case "agent-zero", "crush", "opencode", "qwen-code", "kimi", "goose", "cursor", "gemini-cli", "github-copilot", "factory-droid", "acp":
 		return "unsupported (choices are unavailable before ACP session creation)", "unsupported (no standard ACP speed category)"
 	default:
 		return "unknown", "unknown"
