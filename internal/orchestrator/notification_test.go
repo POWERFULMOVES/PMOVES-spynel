@@ -41,6 +41,15 @@ func TestNotificationFrontMatterPreservesUnknownFieldsAndValidatesOrigin(t *test
 	if _, err := NotificationFromDocument(doc); err == nil {
 		t.Fatal("unsupported origin accepted")
 	}
+	doc.FrontMatter["notify"] = map[string]any{"enabled": true, "origin": "telegram/TG-7", "fallback_origin": "tui/local", "on": []any{"done"}}
+	policy, err = NotificationFromDocument(doc)
+	if err != nil || policy.FallbackOrigin != (Origin{Channel: "tui", Conversation: "local"}) {
+		t.Fatalf("local fallback policy = %#v, %v", policy, err)
+	}
+	doc.FrontMatter["notify"] = map[string]any{"enabled": true, "origin": "telegram/TG-7", "fallback_origin": "whatsapp/WA-1", "on": []any{"done"}}
+	if _, err := NotificationFromDocument(doc); err == nil {
+		t.Fatal("remote fallback accepted")
+	}
 }
 
 func TestOutboxDeduplicatesAndRecoversRetryState(t *testing.T) {
@@ -88,6 +97,119 @@ func TestOutboxDeduplicatesAndRecoversRetryState(t *testing.T) {
 	entry, _ = decodeOutboxForTest(data)
 	if entry.State != "delivered" || entry.Attempts != 2 || entry.DeliveredAt.IsZero() {
 		t.Fatalf("delivered state = %#v", entry)
+	}
+}
+
+func TestOutboxUsesConfiguredLocalFallbackOnlyAfterAuthorizedDirectFailure(t *testing.T) {
+	now := time.Date(2026, 10, 1, 16, 0, 0, 0, time.UTC)
+	var calls []string
+	outbox := &Outbox{Directory: t.TempDir(), Now: func() time.Time { return now }, FallbackAllowed: func(context.Context, Origin) error { return nil }, Deliver: func(_ context.Context, origin Origin, _ string, _ string) error {
+		calls = append(calls, origin.Channel+"/"+origin.Conversation)
+		if origin.Channel == "telegram" {
+			return errors.New("telegram disconnected")
+		}
+		return nil
+	}}
+	entry, err := outbox.EnqueueWithFallback("task-1", "waiting", "telegram/TG-7", "tui/local", "waiting for approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.Process(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(outbox.path(entry.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered, err := decodeOutboxForTest(stored)
+	if err != nil || delivered.State != "delivered" || len(calls) != 2 || calls[0] != "telegram/TG-7" || calls[1] != "tui/local" {
+		t.Fatalf("fallback delivery = %#v, calls=%#v, err=%v", delivered, calls, err)
+	}
+
+	calls = nil
+	outbox = &Outbox{Directory: t.TempDir(), Now: func() time.Time { return now }, FallbackAllowed: func(context.Context, Origin) error { return errors.New("origin revoked") }, Deliver: func(_ context.Context, origin Origin, _ string, _ string) error {
+		calls = append(calls, origin.Channel+"/"+origin.Conversation)
+		return errors.New("must not fallback")
+	}}
+	entry, err = outbox.EnqueueWithFallback("task-2", "waiting", "telegram/TG-7", "tui/local", "waiting for approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.Process(context.Background()); err == nil {
+		t.Fatal("revoked direct origin was not retained as pending")
+	}
+	stored, _ = os.ReadFile(outbox.path(entry.ID))
+	pending, _ := decodeOutboxForTest(stored)
+	if pending.State != "pending" || pending.NextAttemptAt.IsZero() || len(calls) != 1 || calls[0] != "telegram/TG-7" {
+		t.Fatalf("revoked primary = %#v, calls=%#v", pending, calls)
+	}
+}
+
+func TestOutboxExpiresPendingDeliveryWithoutDirectOrFallbackRetry(t *testing.T) {
+	directory := t.TempDir()
+	created := time.Date(2026, 10, 1, 16, 0, 0, 0, time.UTC)
+	now := created
+	var calls []string
+	deliver := func(_ context.Context, origin Origin, _ string, _ string) error {
+		calls = append(calls, origin.Channel+"/"+origin.Conversation)
+		return errors.New("offline")
+	}
+	outbox := &Outbox{Directory: directory, Now: func() time.Time { return now }, FallbackAllowed: func(context.Context, Origin) error { return nil }, Deliver: deliver}
+	entry, err := outbox.EnqueueWithFallback("task-1", "done", "telegram/TG-7", "tui/local", "complete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.Process(context.Background()); err == nil {
+		t.Fatal("initial retry failure was not reported")
+	}
+	now = created.Add(notificationOutboxExpiry - time.Second)
+	if err := outbox.Process(context.Background()); err == nil {
+		t.Fatal("pre-expiry retry failure was not reported")
+	}
+	if len(calls) != 4 {
+		t.Fatalf("pre-expiry calls = %#v", calls)
+	}
+
+	now = created.Add(notificationOutboxExpiry)
+	restarted := &Outbox{Directory: directory, Now: func() time.Time { return now }, FallbackAllowed: outbox.FallbackAllowed, Deliver: deliver}
+	if err := restarted.Process(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(restarted.path(entry.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired, err := decodeOutboxForTest(data)
+	if err != nil || expired.State != "expired" || expired.LastError == "" || !expired.NextAttemptAt.IsZero() || len(calls) != 4 {
+		t.Fatalf("expired entry = %#v, calls=%#v, err=%v", expired, calls, err)
+	}
+	if err := restarted.Process(context.Background()); err != nil || len(calls) != 4 {
+		t.Fatalf("expired restart retried: calls=%#v, err=%v", calls, err)
+	}
+}
+
+func TestOutboxUsesOneClockSnapshotPerPendingEntry(t *testing.T) {
+	created := time.Date(2026, 10, 1, 16, 0, 0, 0, time.UTC)
+	reads := 0
+	var calls int
+	outbox := &Outbox{Directory: t.TempDir(), Now: func() time.Time {
+		reads++
+		if reads == 1 {
+			return created
+		}
+		return created.Add(notificationOutboxExpiry - time.Nanosecond)
+	}, Deliver: func(context.Context, Origin, string, string) error {
+		calls++
+		return errors.New("offline")
+	}}
+	if _, err := outbox.Enqueue("task-1", "done", "cli/local", "complete"); err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.Process(context.Background()); err == nil {
+		t.Fatal("delivery failure was not reported")
+	}
+	if reads != 2 || calls != 1 {
+		t.Fatalf("clock reads = %d, calls = %d; want one process snapshot and one pre-expiry delivery", reads, calls)
 	}
 }
 

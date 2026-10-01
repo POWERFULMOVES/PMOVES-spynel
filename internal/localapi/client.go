@@ -195,7 +195,11 @@ func (c *Client) UnregisterLiveTUI(ctx context.Context) error {
 }
 
 func (c *Client) Notify(ctx context.Context, origin, message string) (string, error) {
-	body, err := json.Marshal(notifyRequest{Origin: origin, Message: message})
+	return c.NotifyWithFallback(ctx, origin, "", message)
+}
+
+func (c *Client) NotifyWithFallback(ctx context.Context, origin, fallbackOrigin, message string) (string, error) {
+	body, err := json.Marshal(notifyRequest{Origin: origin, FallbackOrigin: fallbackOrigin, Message: message})
 	if err != nil {
 		return "", err
 	}

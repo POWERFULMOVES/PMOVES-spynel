@@ -37,9 +37,10 @@ func ParseOrigin(value string) (Origin, error) {
 }
 
 type NotificationPolicy struct {
-	Enabled  bool
-	Origin   Origin
-	Outcomes map[string]bool
+	Enabled        bool
+	Origin         Origin
+	FallbackOrigin Origin
+	Outcomes       map[string]bool
 }
 
 func NotificationFromDocument(document Document) (NotificationPolicy, error) {
@@ -69,6 +70,22 @@ func NotificationFromDocument(document Document) (NotificationPolicy, error) {
 		return policy, err
 	}
 	policy.Origin = origin
+	if fallbackText, exists := values["fallback_origin"]; exists {
+		fallbackValue, ok := fallbackText.(string)
+		if !ok {
+			return policy, errors.New("notify.fallback_origin must be a string")
+		}
+		fallback, err := ParseOrigin(fallbackValue)
+		if err != nil {
+			return policy, fmt.Errorf("notify.fallback_origin: %w", err)
+		}
+		// Remote identities cannot be linked safely. Only local workspace
+		// conversations can be an explicitly configured fallback.
+		if fallback.Channel != "tui" && fallback.Channel != "cli" {
+			return policy, errors.New("notify.fallback_origin must be a local tui or cli origin")
+		}
+		policy.FallbackOrigin = fallback
+	}
 	rawOutcomes, exists := values["on"]
 	if !exists {
 		rawOutcomes = []any{"done"}
@@ -98,23 +115,29 @@ func NotificationFromDocument(document Document) (NotificationPolicy, error) {
 }
 
 type OutboxEntry struct {
-	ID            string    `json:"id"`
-	Origin        string    `json:"origin"`
-	Message       string    `json:"message"`
-	State         string    `json:"state"`
-	Attempts      int       `json:"attempts"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
-	NextAttemptAt time.Time `json:"next_attempt_at,omitempty"`
-	DeliveredAt   time.Time `json:"delivered_at,omitempty"`
-	LastError     string    `json:"last_error,omitempty"`
+	ID             string    `json:"id"`
+	Origin         string    `json:"origin"`
+	FallbackOrigin string    `json:"fallback_origin,omitempty"`
+	Message        string    `json:"message"`
+	State          string    `json:"state"`
+	Attempts       int       `json:"attempts"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	NextAttemptAt  time.Time `json:"next_attempt_at,omitempty"`
+	DeliveredAt    time.Time `json:"delivered_at,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
 }
+
+const notificationOutboxExpiry = 48 * time.Hour
 
 type Outbox struct {
 	Directory string
 	Deliver   func(context.Context, Origin, string, string) error
-	Now       func() time.Time
-	mu        sync.Mutex
+	// FallbackAllowed rechecks that the primary origin remains authorized
+	// before an unavailable direct delivery can use a local fallback.
+	FallbackAllowed func(context.Context, Origin) error
+	Now             func() time.Time
+	mu              sync.Mutex
 }
 
 func (o *Outbox) now() time.Time {
@@ -269,8 +292,21 @@ func skipStringNotificationControl(value string, index int, bellTerminates bool)
 }
 
 func (o *Outbox) Enqueue(deliveryKey, class, origin, message string) (OutboxEntry, error) {
+	return o.EnqueueWithFallback(deliveryKey, class, origin, "", message)
+}
+
+func (o *Outbox) EnqueueWithFallback(deliveryKey, class, origin, fallbackOrigin, message string) (OutboxEntry, error) {
 	if _, err := ParseOrigin(origin); err != nil {
 		return OutboxEntry{}, err
+	}
+	if fallbackOrigin != "" {
+		fallback, err := ParseOrigin(fallbackOrigin)
+		if err != nil {
+			return OutboxEntry{}, err
+		}
+		if fallback.Channel != "tui" && fallback.Channel != "cli" {
+			return OutboxEntry{}, errors.New("fallback origin must be a local tui or cli origin")
+		}
 	}
 	message, err := NormalizeNotificationText(message)
 	if err != nil {
@@ -297,7 +333,7 @@ func (o *Outbox) Enqueue(deliveryKey, class, origin, message string) (OutboxEntr
 		}
 	}
 	now := o.now()
-	entry := OutboxEntry{ID: id, Origin: origin, Message: message, State: "pending", CreatedAt: now, UpdatedAt: now, NextAttemptAt: now}
+	entry := OutboxEntry{ID: id, Origin: origin, FallbackOrigin: fallbackOrigin, Message: message, State: "pending", CreatedAt: now, UpdatedAt: now, NextAttemptAt: now}
 	return entry, o.write(entry)
 }
 
@@ -337,14 +373,28 @@ func (o *Outbox) Process(ctx context.Context) error {
 			continue
 		}
 		var entry OutboxEntry
-		if json.Unmarshal(data, &entry) != nil || entry.State == "delivered" || entry.State == "cancelled" || entry.NextAttemptAt.After(o.now()) {
+		if json.Unmarshal(data, &entry) != nil || entry.State == "delivered" || entry.State == "cancelled" || entry.State == "expired" {
+			continue
+		}
+		now := o.now()
+		if !now.Before(entry.CreatedAt.Add(notificationOutboxExpiry)) {
+			entry.State = "expired"
+			entry.UpdatedAt = now
+			entry.NextAttemptAt = time.Time{}
+			entry.LastError = "notification delivery expired after 48 hours"
+			if writeErr := o.write(entry); writeErr != nil {
+				problems = append(problems, writeErr)
+			}
+			continue
+		}
+		if entry.NextAttemptAt.After(now) {
 			continue
 		}
 		normalized, normalizeErr := NormalizeNotificationText(entry.Message)
 		if normalizeErr != nil {
 			entry.State = "cancelled"
 			entry.Attempts++
-			entry.UpdatedAt = o.now()
+			entry.UpdatedAt = now
 			entry.LastError = normalizeErr.Error()
 			if writeErr := o.write(entry); writeErr != nil {
 				problems = append(problems, writeErr)
@@ -358,8 +408,18 @@ func (o *Outbox) Process(ctx context.Context) error {
 		if deliveryErr == nil {
 			deliveryErr = o.Deliver(ctx, origin, entry.ID, entry.Message)
 		}
+		if deliveryErr != nil && entry.FallbackOrigin != "" && parseErr == nil && (o.FallbackAllowed == nil || o.FallbackAllowed(ctx, origin) == nil) {
+			fallback, fallbackParseErr := ParseOrigin(entry.FallbackOrigin)
+			if fallbackParseErr != nil {
+				deliveryErr = errors.Join(deliveryErr, fallbackParseErr)
+			} else if fallbackErr := o.Deliver(ctx, fallback, entry.ID, entry.Message); fallbackErr != nil {
+				deliveryErr = errors.Join(deliveryErr, fallbackErr)
+			} else {
+				deliveryErr = nil
+			}
+		}
 		entry.Attempts++
-		entry.UpdatedAt = o.now()
+		entry.UpdatedAt = now
 		if deliveryErr == nil {
 			entry.State = "delivered"
 			entry.DeliveredAt = entry.UpdatedAt
