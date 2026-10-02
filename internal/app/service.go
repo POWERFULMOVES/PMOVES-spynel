@@ -195,6 +195,7 @@ func NewWithRuntime(cfg config.Config, target harness.Harness, runtime *Runtime)
 	manager.JobEvent = runtime.RecordJobEvent
 	manager.JobFinished = runtime.EndJob
 	manager.SetNotificationDelivery(service.deliverNotification)
+	manager.Outbox.FallbackAllowed = func(_ context.Context, origin orchestrator.Origin) error { return service.validateOrigin(origin) }
 	return service
 }
 
@@ -303,6 +304,10 @@ func (s *Service) AckNotification(originText, eventID string, afterChars int) er
 }
 
 func (s *Service) Notify(ctx context.Context, originText, text string) (string, error) {
+	return s.NotifyWithFallback(ctx, originText, "", text)
+}
+
+func (s *Service) NotifyWithFallback(ctx context.Context, originText, fallbackOriginText, text string) (string, error) {
 	origin, err := orchestrator.ParseOrigin(originText)
 	if err != nil {
 		return "", err
@@ -313,8 +318,20 @@ func (s *Service) Notify(ctx context.Context, originText, text string) (string, 
 	if err := s.validateOrigin(origin); err != nil {
 		return "", err
 	}
+	if fallbackOriginText != "" {
+		fallback, err := orchestrator.ParseOrigin(fallbackOriginText)
+		if err != nil {
+			return "", err
+		}
+		if fallback.Channel != "tui" && fallback.Channel != "cli" {
+			return "", errors.New("fallback origin must be a local tui or cli origin")
+		}
+		if err := s.validateOrigin(fallback); err != nil {
+			return "", err
+		}
+	}
 	deliveryKey := fmt.Sprintf("manual-%d", time.Now().UTC().UnixNano())
-	entry, err := s.Orchestrator.Outbox.Enqueue(deliveryKey, "manual", originText, text)
+	entry, err := s.Orchestrator.Outbox.EnqueueWithFallback(deliveryKey, "manual", originText, fallbackOriginText, text)
 	if err != nil {
 		return "", err
 	}

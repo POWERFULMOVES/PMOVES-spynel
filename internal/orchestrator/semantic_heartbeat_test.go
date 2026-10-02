@@ -94,7 +94,7 @@ func TestSemanticHeartbeatIgnoresProviderProseWithoutFrameworkState(t *testing.T
 	target.mu.Lock()
 	prompt := target.prompt
 	target.mu.Unlock()
-	if !strings.Contains(prompt, "final-response payload") || !strings.Contains(prompt, "tasks") || !strings.Contains(prompt, "command /trigger orchestrator") || !strings.Contains(prompt, "agents do the work") || !strings.Contains(prompt, "spynel notify --recent-authorized") {
+	if !strings.Contains(prompt, "final-response payload") || !strings.Contains(prompt, "tasks") || !strings.Contains(prompt, "command /trigger orchestrator") || !strings.Contains(prompt, "agents do the work") || !strings.Contains(prompt, "spynel notify --recent-authorized") || !strings.Contains(prompt, "durable pending notification deliveries") || !strings.Contains(prompt, "exact originating channel") || !strings.Contains(prompt, "explicitly authorized fallback") || !strings.Contains(prompt, "never infer a recipient") || !strings.Contains(prompt, "expired after 48 hours") || !strings.Contains(prompt, "do not retry, reactivate, or alter them") {
 		t.Fatalf("heartbeat prompt omitted worker/CLI guidance: %q", prompt)
 	}
 	if strings.Contains(prompt, "HEARTBEAT_ACTION_COMMAND") || strings.Contains(prompt, "spynel.semantic-heartbeat/v1") || strings.Contains(prompt, "Finish with only one JSON") {
