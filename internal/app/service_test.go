@@ -135,11 +135,22 @@ func TestNotifyDeliversAllOriginsWithStableEventIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, _ := config.Load(config.PathForRoot(root))
-	cfg.Channels.Telegram.AllowedUsers = []string{"7"}
-	cfg.Channels.WhatsApp.AllowedNumbers = []string{"15557654321"}
+	// A task's explicit origin must not be routed through the recent-authorized
+	// chooser, which rejects multiple authorized remote principals.
+	cfg.Channels.Telegram.AllowedUsers = []string{"7", "8"}
+	cfg.Channels.WhatsApp.AllowedNumbers = []string{"15557654321", "15557654322"}
 	service := New(cfg, newServiceHarness())
 	router := &notificationRouter{}
 	service.DeliveryControl = router
+	for _, origin := range []string{"telegram/TG-8", "whatsapp/WA-15557654322"} {
+		channelName, conversation, _ := strings.Cut(origin, "/")
+		if _, err := service.History.Append(channelName, conversation, history.Entry{Role: "user", Content: "other authorized conversation"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := service.NotifyRecentAuthorized(context.Background(), "must stay ambiguous"); err == nil {
+		t.Fatal("fixture did not make recent-authorized routing ambiguous")
+	}
 	for _, origin := range []string{"tui/local", "cli/local", "telegram/TG-7", "whatsapp/WA-15557654321"} {
 		channelName, conversation, _ := strings.Cut(origin, "/")
 		if _, err := service.History.Append(channelName, conversation, history.Entry{Role: "user", Content: "known"}); err != nil {

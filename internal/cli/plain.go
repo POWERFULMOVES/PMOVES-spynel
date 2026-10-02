@@ -132,6 +132,7 @@ func runNotifyCommand(args []string, version string) error {
 	configPath := flags.String("config", "", "path to .spynel/config.yaml")
 	workdir := flags.String("workdir", "", "absolute Spynel workspace path")
 	origin := flags.String("origin", "", "stable channel/conversation origin")
+	fallbackOrigin := flags.String("fallback-origin", "", "explicit local tui/cli fallback origin")
 	recentAuthorized := flags.Bool("recent-authorized", false, "route to the most recently active unambiguous authorized conversation")
 	message := flags.String("message", "", "notification message")
 	stdin := flags.Bool("stdin", false, "read the notification from standard input")
@@ -178,9 +179,12 @@ func runNotifyCommand(args []string, version string) error {
 		return clientErr
 	} else if active {
 		if *recentAuthorized {
+			if strings.TrimSpace(*fallbackOrigin) != "" {
+				return errors.New("--fallback-origin requires --origin")
+			}
 			id, err = client.NotifyRecentAuthorized(ctx, text)
 		} else {
-			id, err = client.Notify(ctx, *origin, text)
+			id, err = client.NotifyWithFallback(ctx, *origin, *fallbackOrigin, text)
 		}
 	} else {
 		service, buildErr := buildService(cfg, version)
@@ -189,9 +193,12 @@ func runNotifyCommand(args []string, version string) error {
 		}
 		defer service.Close()
 		if *recentAuthorized {
+			if strings.TrimSpace(*fallbackOrigin) != "" {
+				return errors.New("--fallback-origin requires --origin")
+			}
 			id, err = service.NotifyRecentAuthorized(ctx, text)
 		} else {
-			id, err = service.Notify(ctx, *origin, text)
+			id, err = service.NotifyWithFallback(ctx, *origin, *fallbackOrigin, text)
 		}
 	}
 	if err != nil {

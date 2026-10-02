@@ -103,6 +103,9 @@ func (m *Manager) notificationAgentPrompt(taskFile, outcome string) (string, err
 	mode := m.runtimeSnapshot().Orchestrator.TaskNotifications
 	origin := policy.Origin.Channel + "/" + policy.Origin.Conversation
 	command := notificationCommand(executable, m.Config.Root, origin)
+	if policy.FallbackOrigin.Channel != "" {
+		command += " --fallback-origin " + shellQuote(policy.FallbackOrigin.Channel+"/"+policy.FallbackOrigin.Conversation)
+	}
 	titleJSON, _ := json.Marshal(truncateLine(stringField(document, "title"), notificationTitleRunes))
 	pathJSON, _ := json.Marshal(taskFile)
 	prompt := sanitizeNotificationTemplate(string(template))

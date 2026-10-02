@@ -218,6 +218,26 @@ func TestInitializedChatPromptContainsEvidenceGroundedHonestyContract(t *testing
 	}
 }
 
+func TestInitializedHeartbeatPromptCoversPendingNotificationRecovery(t *testing.T) {
+	root := t.TempDir()
+	if err := Init(root, false); err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := os.ReadFile(filepath.Join(root, ".spynel", "prompts", "heartbeat.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"durable pending notification deliveries", "ordinary retry or repair mechanisms",
+		"exact originating channel", "explicitly authorized fallback", "never infer a recipient",
+		"expired after 48 hours", "do not retry, reactivate, or alter them",
+	} {
+		if !strings.Contains(string(prompt), required) {
+			t.Errorf("initialized heartbeat prompt omitted %q", required)
+		}
+	}
+}
+
 func TestUpgradeAddsReviewAssetsWithoutOverwritingPrompts(t *testing.T) {
 	root := t.TempDir()
 	if err := Init(root, false); err != nil {

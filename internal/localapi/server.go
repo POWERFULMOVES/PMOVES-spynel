@@ -60,6 +60,7 @@ type settingsRequest struct {
 }
 type notifyRequest struct {
 	Origin           string `json:"origin,omitempty"`
+	FallbackOrigin   string `json:"fallback_origin,omitempty"`
 	RecentAuthorized bool   `json:"recent_authorized,omitempty"`
 	Message          string `json:"message"`
 }
@@ -199,9 +200,13 @@ func (s *Server) notify(response http.ResponseWriter, request *http.Request) {
 	var id string
 	var err error
 	if input.RecentAuthorized {
+		if strings.TrimSpace(input.FallbackOrigin) != "" {
+			http.Error(response, "fallback_origin requires origin", http.StatusBadRequest)
+			return
+		}
 		id, err = s.Service.NotifyRecentAuthorized(request.Context(), input.Message)
 	} else {
-		id, err = s.Service.Notify(request.Context(), input.Origin, input.Message)
+		id, err = s.Service.NotifyWithFallback(request.Context(), input.Origin, input.FallbackOrigin, input.Message)
 	}
 	if err != nil {
 		writeError(response, err)

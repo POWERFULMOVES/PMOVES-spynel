@@ -21,13 +21,14 @@ func Create(cfg config.Config, routeName, title, body string) (string, error) {
 }
 
 type CreateOptions struct {
-	Notify       bool
-	Origin       string
-	Outcomes     []string
-	ParentTaskID string
-	GoalID       string
-	GoalRound    int
-	NoReview     bool
+	Notify         bool
+	Origin         string
+	Outcomes       []string
+	FallbackOrigin string
+	ParentTaskID   string
+	GoalID         string
+	GoalRound      int
+	NoReview       bool
 }
 
 func CreateWithOptions(cfg config.Config, routeName, title, body string, options CreateOptions) (string, error) {
@@ -76,6 +77,13 @@ func CreateWithOptions(cfg config.Config, routeName, title, body string, options
 				outcomes = []string{"done", "failed", "waiting", "cancelled"}
 			}
 			notify["origin"] = options.Origin
+			if options.FallbackOrigin != "" {
+				fallback, err := ParseOrigin(options.FallbackOrigin)
+				if err != nil || (fallback.Channel != "tui" && fallback.Channel != "cli") {
+					return "", errors.New("notification fallback origin must be a local tui or cli origin")
+				}
+				notify["fallback_origin"] = options.FallbackOrigin
+			}
 			notify["on"] = outcomes
 			for _, outcome := range outcomes {
 				if outcome != "done" && outcome != "failed" && outcome != "waiting" && outcome != "cancelled" {
